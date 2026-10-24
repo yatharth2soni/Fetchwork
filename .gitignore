@@ -1,0 +1,30 @@
+# Secrets and local data
+.env
+.env.*
+!.env.example
+resume.local.json
+private_keys.json
+*.pem
+*.key
+.vscode/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated output
+backend/output/*
+!backend/output/.gitkeep
+*.log
+
+# Frontend
+node_modules/
+dist/
+
+# OS / editor
+.DS_Store
+Thumbs.db

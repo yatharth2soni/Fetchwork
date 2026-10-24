@@ -1,0 +1,65 @@
+{
+  "name": "Alex Example",
+  "email": "alex.example@example.com",
+  "phone": "+1-555-0100",
+  "location": "Austin, TX",
+  "linkedin": "https://www.linkedin.com/in/alex-example",
+  "github": "https://github.com/alex-example",
+  "summary": "Computer science student interested in applied AI agents and backend systems. Comfortable with Python, APIs, and clear technical writing.",
+  "education": [
+    {
+      "institution": "Example State University",
+      "degree": "B.S.",
+      "field": "Computer Science",
+      "start": "2022",
+      "end": "2026",
+      "details": [
+        "Relevant coursework: Data Structures, Databases, Machine Learning"
+      ]
+    }
+  ],
+  "experience": [
+    {
+      "company": "Campus Tech Lab",
+      "title": "Software Engineering Intern",
+      "start": "2025-05",
+      "end": "2025-08",
+      "location": "Austin, TX",
+      "bullets": [
+        "Built internal Python scripts to validate API responses for a student-facing portal",
+        "Wrote pytest coverage for URL parsing and JSON schema checks",
+        "Documented setup steps for Windows PowerShell and macOS contributors"
+      ]
+    },
+    {
+      "company": "University Help Desk",
+      "title": "Student Support Assistant",
+      "start": "2023-09",
+      "end": "2025-04",
+      "location": "Austin, TX",
+      "bullets": [
+        "Resolved account and software issues for students and staff",
+        "Escalated network incidents with clear written summaries"
+      ]
+    }
+  ],
+  "projects": [
+    {
+      "name": "Course Planner CLI",
+      "description": "Command-line tool that suggests semester schedules from degree requirements.",
+      "url": "https://github.com/alex-example/course-planner",
+      "technologies": ["Python", "pytest"],
+      "bullets": [
+        "Parsed requirement JSON and produced conflict-free course lists",
+        "Added unit tests for edge cases around prerequisite chains"
+      ]
+    }
+  ],
+  "skills": [
+    "Python",
+    "pytest",
+    "HTTP APIs",
+    "Git",
+    "Technical writing"
+  ]
+}

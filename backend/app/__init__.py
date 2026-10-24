@@ -1,0 +1,1 @@
+"""InternAssist uAgent application package."""

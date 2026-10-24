@@ -1,0 +1,8 @@
+uagents==0.26.1
+uagents-core==0.4.12
+fpdf2==2.8.9
+httpx==0.28.1
+pydantic==2.14.1
+python-dotenv==1.2.4
+openai==3.37.0
+pytest==9.1.1
