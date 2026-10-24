@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ from uagents_core.contrib.protocols.chat.cards import (
     create_card_response_content,
     extract_card,
 )
+from uagents_core.types import DeliveryStatus
 
 # Ensure backend directory is in sys.path
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -27,6 +29,7 @@ if str(_BACKEND_DIR) not in sys.path:
 
 from scripts.spike_agent import (
     DUMMY_LETTER_TEXT,
+    _ACTIVE_DRAFTS,
     _IDEMPOTENCY_WINDOW_S,
     _SESSION_LOCKS,
     _is_duplicate_request,
@@ -42,7 +45,33 @@ from scripts.spike_agent import (
     parse_canonical_text_action,
     render_dummy_pdf,
     sanitize_payload,
+    send_with_retry,
+    store_session_draft,
+    store_user_resume,
+    SessionDraft,
 )
+
+
+def test_send_with_retry_retries_failed_delivery_status():
+    """A transient mailbox failure retries without duplicating a successful send."""
+    ctx = MagicMock()
+    ctx.logger = MagicMock()
+    ctx.send = AsyncMock(
+        side_effect=[
+            SimpleNamespace(status=DeliveryStatus.FAILED),
+            SimpleNamespace(status=DeliveryStatus.DELIVERED),
+        ]
+    )
+
+    with patch("scripts.spike_agent.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        result = asyncio.run(
+            send_with_retry(ctx, "agent1qrecipient", ChatMessage(content=[]))
+        )
+
+    assert result.status == DeliveryStatus.DELIVERED
+    assert ctx.send.await_count == 2
+    sleep.assert_awaited_once_with(1)
+from app.models import Resume
 
 
 
@@ -280,8 +309,8 @@ def test_classify_text_cta_mention_does_not_match_embedded_command():
         # @mention with a non-CTA remainder
         "@InternAssist please help me",
         "@InternAssist can you generate a pdf?",
-        # Two @mentions in a row (second is not a CTA)
-        "@InternAssist @otheragent generate_pdf",
+        # Two @mentions in a row (remainder is not a CTA)
+        "@InternAssist @otheragent not_a_command",
         # Trailing garbage after CTA
         "@InternAssist generate pdf now",
         "@InternAssist generate_pdf please",
@@ -308,6 +337,13 @@ def test_parse_action_selection_mention_prefix_reaches_deliver_pdf():
     agent_addr = "agent1q07xd588w2te2e7jj89240jxgxz66fdft09typ052egt4k5ngyhtkwh59ud"
     mention_text = f"@{agent_addr} generate_pdf"
     msg = ChatMessage(content=[TextContent(text=mention_text)])
+    store_session_draft(
+        agent_addr,
+        DUMMY_LETTER_TEXT,
+        "Alex Example",
+        "https://example.com/job",
+        draft_id="dummy-draft-001",
+    )
 
     with patch("scripts.spike_agent.deliver_pdf", new_callable=AsyncMock) as mock_deliver:
         asyncio.run(
@@ -366,6 +402,13 @@ def test_exact_text_cta_reaches_deliver_pdf_exactly_once():
     ctx.send = AsyncMock()
 
     msg = ChatMessage(content=[TextContent(text="Generate PDF")])
+    store_session_draft(
+        "agent1q_test",
+        DUMMY_LETTER_TEXT,
+        "Alex Example",
+        "https://example.com/job",
+        draft_id="dummy-draft-001",
+    )
 
     with patch("scripts.spike_agent.deliver_pdf", new_callable=AsyncMock) as mock_deliver:
         asyncio.run(
@@ -426,18 +469,24 @@ def test_unsupported_single_text_action_does_not_call_deliver_pdf_or_resend_card
 
 
 def test_long_ordinary_text_still_sends_review_card():
-    """Verify the temporary fallback is limited to normalized text of 80 characters."""
+    """Verify ordinary text with no URLs sends URL guidance and no Review Card."""
     ctx = MagicMock()
     ctx.logger = MagicMock()
     ctx.send = AsyncMock()
+    sender = "agent1q_test"
+    store_user_resume(sender, Resume(name="Test Applicant", summary="Software engineer with experience."))
     msg = ChatMessage(content=[TextContent(text="x" * 81)])
 
     with patch("scripts.spike_agent.deliver_pdf", new_callable=AsyncMock) as mock_deliver:
-        asyncio.run(handle_chat_message(ctx=ctx, sender="agent1q_test", msg=msg))
+        asyncio.run(handle_chat_message(ctx=ctx, sender=sender, msg=msg))
 
     mock_deliver.assert_not_called()
+    assert ctx.send.await_count == 2
     sent_msg = ctx.send.call_args_list[1][0][1]
-    assert any(isinstance(block, MetadataContent) for block in sent_msg.content)
+    assert not any(isinstance(block, MetadataContent) for block in sent_msg.content)
+    assert sent_msg.content[0].text == (
+        "Please send one public job-posting URL to create a tailored cover letter."
+    )
 
 
 
@@ -522,15 +571,20 @@ def test_deliver_pdf_agentverse_resource_content(tmp_path: Path):
             write=False,
         )
 
-        ctx.send.assert_awaited_once()
-        sent_msg = ctx.send.call_args[0][1]
+        assert ctx.send.await_count == 2
+        sent_msg = ctx.send.call_args_list[0][0][1]
         assert isinstance(sent_msg, ChatMessage)
         resource_blocks = [
             b for b in sent_msg.content if isinstance(b, ResourceContent)
         ]
         assert len(resource_blocks) == 1
+        assert sent_msg.content == resource_blocks
         assert str(resource_blocks[0].resource_id) == mock_asset_id
         assert resource_blocks[0].resource.metadata["mime_type"] == "application/pdf"
+        local_copy = tmp_path / "cover_letter_test-draft-av.pdf"
+        assert local_copy.read_bytes() == pdf_bytes
+        local_notice = ctx.send.call_args_list[1][0][1]
+        assert str(local_copy) in local_notice.content[0].text
 
 
 # ---------------------------------------------------------------------------
@@ -622,9 +676,16 @@ def test_concurrent_generate_pdf_does_not_call_deliver_pdf_twice():
     ctx.send = AsyncMock()
 
     sender = "agent1q_idempotency_test"
-    draft_id = "idem-draft-001"
+    draft_id = "dummy-draft-001"
     msg = ChatMessage(
         content=[TextContent(text="generate_pdf")]
+    )
+    sa.store_session_draft(
+        sender,
+        DUMMY_LETTER_TEXT,
+        "Alex Example",
+        "https://example.com/job",
+        draft_id=draft_id,
     )
 
     # Clear any stale session lock for this sender+draft.
@@ -668,6 +729,13 @@ def test_generation_lock_is_released_after_pdf_delivery():
     draft_id = "dummy-draft-001"
     key = (sender, draft_id, "generate_pdf")
     sa._SESSION_LOCKS.pop(key, None)
+    sa.store_session_draft(
+        sender,
+        DUMMY_LETTER_TEXT,
+        "Alex Example",
+        "https://example.com/job",
+        draft_id=draft_id,
+    )
 
     with patch("scripts.spike_agent.deliver_pdf", new_callable=AsyncMock) as mock_deliver:
         asyncio.run(
@@ -720,18 +788,23 @@ def test_agentverse_success_response_includes_resource_content(tmp_path: Path):
             )
         )
 
-    ctx.send.assert_awaited_once()
-    sent_msg = ctx.send.call_args[0][1]
+    assert ctx.send.await_count == 2
+    sent_msg = ctx.send.call_args_list[0][0][1]
     assert isinstance(sent_msg, ChatMessage)
 
     resource_blocks = [b for b in sent_msg.content if isinstance(b, ResourceContent)]
     assert len(resource_blocks) == 1, "Must include exactly one ResourceContent block"
+    assert sent_msg.content == resource_blocks
     rc = resource_blocks[0]
     assert rc.resource.uri.startswith("agent-storage://"), (
         f"URI must use agent-storage scheme, got: {rc.resource.uri!r}"
     )
     assert rc.resource.metadata["mime_type"] == "application/pdf"
     assert str(rc.resource_id) == mock_asset_id
+    local_copy = tmp_path / "cover_letter_rsc-draft-001.pdf"
+    assert local_copy.read_bytes() == pdf_bytes
+    local_notice = ctx.send.call_args_list[1][0][1]
+    assert str(local_copy) in local_notice.content[0].text
 
 
 def test_plain_generate_pdf_text_reaches_deliver_pdf_once():
@@ -746,6 +819,13 @@ def test_plain_generate_pdf_text_reaches_deliver_pdf_once():
     draft_id = "dummy-draft-001"
     key = (sender, draft_id, "generate_pdf")
     sa._SESSION_LOCKS.pop(key, None)  # ensure clean state
+    sa.store_session_draft(
+        sender,
+        DUMMY_LETTER_TEXT,
+        "Alex Example",
+        "https://example.com/job",
+        draft_id=draft_id,
+    )
 
     msg = ChatMessage(content=[TextContent(text="generate_pdf")])
 
@@ -783,6 +863,14 @@ def test_handle_chat_message_mention_prefixed_json_calls_deliver_pdf_once_no_car
     draft_id = "json-draft-001"
     key = (sender, draft_id, "generate_pdf")
     sa._SESSION_LOCKS.pop(key, None)
+    import time
+    sa._ACTIVE_DRAFTS[sender] = sa.SessionDraft(
+        draft_id=draft_id,
+        letter_text=DUMMY_LETTER_TEXT,
+        applicant_name="Alex Example",
+        source_url="https://example.com/job",
+        created_at=time.monotonic(),
+    )
 
     agent_addr = "agent1q07xd588w2te2e7jj89240jxgxz66fdft09typ052egt4k5ngyhtkwh59ud"
     payload_text = f'@{agent_addr} {{"action":"generate_pdf","draft_id":"{draft_id}","primary":true}}'
@@ -858,6 +946,13 @@ def test_handle_chat_message_duplicate_msg_id_is_ignored():
     sender = "agent1q_dup_msg_test"
     fixed_id = uuid4()
     msg = ChatMessage(msg_id=fixed_id, content=[TextContent(text="generate_pdf")])
+    sa.store_session_draft(
+        sender,
+        DUMMY_LETTER_TEXT,
+        "Alex Example",
+        "https://example.com/job",
+        draft_id="dummy-draft-001",
+    )
 
     sa._SEEN_MSG_IDS.pop(str(fixed_id), None)
     key = (sender, "dummy-draft-001", "generate_pdf")
